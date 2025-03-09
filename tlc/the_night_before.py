@@ -100,7 +100,7 @@ def format_git_date(dt: datetime.datetime) -> str:
     return dt.strftime(f"%a %b %-d %H:%M:%S %Y {formatted_offset}")
 
 
-def generate_filter_branch_command(commits_to_fix: List[Tuple[str, datetime.datetime, datetime.datetime]]) -> str:
+def generate_filter_branch_command(commits_to_fix: List[Tuple[str, datetime.datetime, datetime.datetime]]) -> List[str]:
     """
     Generate the git filter-branch command to fix the commit timestamps.
     
@@ -108,13 +108,9 @@ def generate_filter_branch_command(commits_to_fix: List[Tuple[str, datetime.date
         commits_to_fix: List of tuples (commit_hash, original_datetime, new_datetime)
     
     Returns:
-        The git filter-branch command as a string
-    """
-    env_filter = 'export GIT_COMMITTER_NAME="$GIT_COMMITTER_NAME"\n'
-    env_filter += 'export GIT_COMMITTER_EMAIL="$GIT_COMMITTER_EMAIL"\n'
-    env_filter += 'export GIT_AUTHOR_NAME="$GIT_AUTHOR_NAME"\n'
-    env_filter += 'export GIT_AUTHOR_EMAIL="$GIT_AUTHOR_EMAIL"\n\n'
-    
+        The git filter-branch command as a list of arguments
+    """  
+    env_filter = ''
     for commit_hash, _, new_time in commits_to_fix:
         new_date_str = format_git_date(new_time)
         env_filter += f'if [ $GIT_COMMIT = {commit_hash} ]\nthen\n'
@@ -126,7 +122,7 @@ def generate_filter_branch_command(commits_to_fix: List[Tuple[str, datetime.date
         "git", "filter-branch", "--force", "--env-filter", env_filter, "--", "--all"
     ]
     
-    return " ".join(command)
+    return command
 
 
 def fix_commit_times(dry_run: bool = False) -> None:
@@ -175,7 +171,7 @@ def fix_commit_times(dry_run: bool = False) -> None:
     
     if dry_run:
         print("Dry run: The following command would be executed:")
-        print(filter_branch_command)
+        print(" ".join(filter_branch_command))
         return
     
     # Ask for confirmation
@@ -193,7 +189,7 @@ def fix_commit_times(dry_run: bool = False) -> None:
         # Run the filter-branch command
         subprocess.run(
             filter_branch_command,
-            shell=True,
+            shell=False,
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
