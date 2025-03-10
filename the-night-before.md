@@ -10,25 +10,15 @@ No outputs, will simply update the git repository.
 
 ## Implementation
 
-the-night-before is a python script which allows you to amend the time stamps in git commits as if you committed the night before, so it doesn't look like you're committing to open-source projects during work hours.
+the-night-before is a python script which allows you to amend the time stamps in git commits as if you committed the night before, so it doesn't look like you're committing to open-source projects during work hours (8am-7pm).
 
-Provides a tool that lets you run:
-
-```
-the-night-before fix
-```
-
-This will list all commits that are listed as being during 9am to 7pm Monday to Friday, and will pick a time the night before (10pm-3am) to ammend it to so that the commit times are roughly spaced.
-
-The tool will print what changes it will make and get user confirmation before making them.
-
-Also supports:
+### Commands
 
 ```
 the-night-before check
 ```
 
-Checks if any commits are made in work hours and fails with a message to fix with `the-night-before fix` if so.
+Checks if any commits are made in work hours (8am-7pm) and fails with a message to fix with `the-night-before fix` if so.
 
 ```
 the-night-before install-git-hooks
@@ -37,18 +27,38 @@ the-night-before install-git-hooks
 Installs git pre-push hooks using `the-night-before check` to prevent commits being made during work hours being pushed to a remote repository.
 
 ```
+the-night-before fix
+```
+
+This will list all commits from the past 24 hours, and amend the author and commit times for all of them to be the night before in the hours between 10pm and 3am.
+
+The tool will print what changes it will make and get user confirmation before making them.
+
+```
 the-night-before dry-run
 ```
 
-This will print what git commands will be run without making any actual changes.
+This must print what git commands will be run by `the-night-before fix` without making any actual changes.
 
-Do not update:
-- GIT_COMMITTER_NAME
-- GIT_COMMITTER_EMAIL
-- GIT_AUTHOR_NAME
-- GIT_AUTHOR_EMAIL
+Use the following jinja2 template to generate the filter-branch command:
 
-The env-filter must be passed as a whole string, you can do this by passing a list of arguments in to subprocess.run
+```jinja2
+git filter-branch -f --env-filter \
+    '{% for commit in commits_to_fix %}
+    if [ $GIT_COMMIT = {{ commit.hash }} ]
+     then
+         export GIT_AUTHOR_DATE="{{ commit.new_date }}"
+         export GIT_COMMITTER_DATE="{{ commit.new_date }}"
+     fi{% endfor %}'
+```
+
+When working out the new timestamps, we must ensure chronological order is maintained. To do this, the script should:
+
+- collect all commits from the last 24 hours (including ones already outside of working hours) sorted by date
+- divide the available target time (10pm-3am last night) into equal chunks
+- for each commit, pick a random time in its chunk, normally distributed around the middle of the chunk
+
+The script only works on commits from the last day.
 
 ### Ammending commit times
 
