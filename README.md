@@ -5,7 +5,11 @@ A tool that modifies git commit timestamps to make it appear as if you worked ou
 ## Installation
 
 ```bash
+# Install the-night-before with uvx
 uv tool install .
+
+# Install the pre-push hook
+the-night-before install-git-hooks
 ```
 
 ## Usage
@@ -41,3 +45,7 @@ This will:
 ## Warning
 
 This tool rewrites git history. Use with caution, especially on public repositories or branches that others may have pulled from. After running this tool, you may need to force push your changes.
+
+## Development
+
+This tool was built with [the-last-compiler](https://github.com/james-lomax/the-last-compiler).

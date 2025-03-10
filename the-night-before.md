@@ -25,6 +25,18 @@ The tool will print what changes it will make and get user confirmation before m
 Also supports:
 
 ```
+the-night-before check
+```
+
+Checks if any commits are made in work hours and fails with a message to fix with `the-night-before fix` if so.
+
+```
+the-night-before install-git-hooks
+```
+
+Installs git pre-push hooks using `the-night-before check` to prevent commits being made during work hours being pushed to a remote repository.
+
+```
 the-night-before dry-run
 ```
 
