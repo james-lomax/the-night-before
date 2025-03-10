@@ -14,37 +14,27 @@ the-night-before install-git-hooks
 
 ## Usage
 
-First, navigate to your git repository:
+In your git repository you will see an error if you try to push commits with timestamps during work hours:
 
 ```bash
-cd /path/to/your/repo
+% git push -f
+Found commits during work hours (8am-7pm):
+  affe5ed3 - 2025-03-10 16:08:59
+
+Use 'the-night-before fix' to update these commit times.
+Push rejected: Commits during work hours detected.
+Run 'the-night-before fix' to fix the commit times.
 ```
 
-### List commits made during work hours
-
-To see what commits would be modified and preview the changes without making them:
-
-```bash
-the-night-before dry-run
-```
-
-### Fix commit timestamps
-
-To modify the timestamps of all commits from the last 24 hours to be the night before:
+Fix the commits by modifying the author and commit timestamps for all the commits in the last 24 hours to be between 10pm and 3am:
 
 ```bash
 the-night-before fix
 ```
 
-This will:
-1. List all commits from the last 24 hours
-2. Show you the original and new timestamps 
-3. Ask for confirmation before making changes
-4. Modify the commit timestamps to a random times between 10pm and 3am the night before
-
 ## Warning
 
-This tool rewrites git history. Use with caution, especially on public repositories or branches that others may have pulled from. After running this tool, you may need to force push your changes.
+This tool dangerously rewrites git history. Use with caution, especially on public repositories or branches that others may have pulled from. After running this tool, you may need to force push your changes.
 
 ## Development
 
