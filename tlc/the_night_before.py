@@ -79,8 +79,10 @@ def generate_new_timestamps(commits: List[Dict[str, Any]]) -> List[Dict[str, Any
     
     # Find the night before
     now = datetime.datetime.now()
+    # Use timedelta to properly handle month/year boundaries
+    yesterday = now - datetime.timedelta(days=1)
     night_start = datetime.datetime(
-        now.year, now.month, now.day - 1, 22, 0, 0
+        yesterday.year, yesterday.month, yesterday.day, 22, 0, 0
     )  # 10pm last night
     night_end = datetime.datetime(
         now.year, now.month, now.day, 3, 0, 0
@@ -116,8 +118,8 @@ def generate_new_timestamps(commits: List[Dict[str, Any]]) -> List[Dict[str, Any
         
         # Format for git (e.g., "Fri Jan 2 21:38:53 2009 -0800")
         timezone = datetime.datetime.now().astimezone().strftime("%z")
-        timezone_formatted = f"{timezone[:3]}:{timezone[3:]}"
-        new_date = new_time.strftime("%a %b %-d %H:%M:%S %Y ") + timezone_formatted
+        # Git format doesn't use colon in timezone
+        new_date = new_time.strftime("%a %b %-d %H:%M:%S %Y ") + timezone
         
         result.append({
             **commit,
