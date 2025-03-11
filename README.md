@@ -26,7 +26,7 @@ Push rejected: Commits during work hours detected.
 Run 'the-night-before fix' to fix the commit times.
 ```
 
-Fix the commits by modifying the author and commit timestamps for all the commits in the last 24 hours to be between 10pm and 3am:
+Fix the commits by modifying the author and commit timestamps:
 
 ```bash
 the-night-before fix

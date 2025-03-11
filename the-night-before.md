@@ -1,4 +1,8 @@
-# the_night_before.py
+# tlc/the_night_before.py
+
+the-night-before is a python script which allows you to amend the time stamps in git commits as if you committed the night before, so it doesn't look like you're committing to open-source projects during work hours.
+
+Work hours are defined as 8am-7pm by default, but should be configurable.
 
 ## Inputs
 
@@ -10,7 +14,7 @@ No outputs, will simply update the git repository.
 
 ## Implementation
 
-the-night-before is a python script which allows you to amend the time stamps in git commits as if you committed the night before, so it doesn't look like you're committing to open-source projects during work hours (8am-7pm).
+tlc/the_night_before.py will implement a main function, and we will add a script entry to the uv pyproject.toml file.
 
 ### Commands
 
@@ -18,7 +22,7 @@ the-night-before is a python script which allows you to amend the time stamps in
 the-night-before check
 ```
 
-Checks if any commits are made in work hours (8am-7pm) and fails with a message to fix with `the-night-before fix` if so.
+Checks if any commits authored by you are made in work hours and fails with a message to fix with `the-night-before fix` if so.
 
 ```
 the-night-before install-git-hooks
@@ -30,13 +34,39 @@ Installs git pre-push hooks using `the-night-before check` to prevent commits be
 the-night-before fix
 ```
 
-This will list all commits from the past 24 hours, and amend the author and commit times for all of them to be the night before in the hours between 10pm and 3am.
+This will list all commits authored by you which were made during work hours and amend the author and commit times for all of them to be the night before. For each commit made during work hours, the script will update the author and commit times to be a time picked between 8pm and 5am the previous night. The script will ensure it picks a time at least 10 minutes after the preceding commit (and as early as possible). If these two conditions cannot be satisfied, the script will fail.
 
-The tool will print what changes it will make and get user confirmation before making them.
+The tool will print the source of the filter-repo script and get use confirmation before effecting the change.
 
 ```
 the-night-before dry-run
 ```
+
+This must print what git commands will be run by `the-night-before fix` without making any actual changes.
+
+### Configuration
+
+The tool should support the following configuration options:
+
+1. Work hours definition (start and end time)
+2. Weekend detection (option to skip commits made on weekends)
+3. Custom time ranges for night-before timestamps
+
+### Required Improvements
+
+#### 1. Robust Git Date Handling
+
+Ensure robust parsing of git date formats by:
+- Supporting multiple date formats (RFC 2822, ISO 8601)
+- Preserving timezone information in the original commits
+
+#### 2. Weekend Detection
+
+Add detection for weekends:
+- Skip commits made on Saturday and Sunday regardless of time
+- Make this behavior configurable
+
+#### 3. using git filter-branch
 
 This must print what git commands will be run by `the-night-before fix` without making any actual changes.
 
@@ -50,25 +80,4 @@ git filter-branch -f --env-filter \
          export GIT_AUTHOR_DATE="{{ commit.new_date }}"
          export GIT_COMMITTER_DATE="{{ commit.new_date }}"
      fi{% endfor %}'
-```
-
-When working out the new timestamps, we must ensure chronological order is maintained. To do this, the script should:
-
-- collect all commits from the last 24 hours (including ones already outside of working hours) sorted by date
-- divide the available target time (10pm-3am last night) into equal chunks
-- for each commit, pick a random time in its chunk, normally distributed around the middle of the chunk
-
-The script only works on commits from the last day.
-
-### Ammending commit times
-
-Use a command formatted like this one to ammend each commit
-
-```
-git filter-branch --env-filter \
-    'if [ $GIT_COMMIT = 119f9ecf58069b265ab22f1f97d2b648faf932e0 ]
-     then
-         export GIT_AUTHOR_DATE="Fri Jan 2 21:38:53 2009 -0800"
-         export GIT_COMMITTER_DATE="Sat May 19 01:01:01 2007 -0700"
-     fi'
 ```

@@ -1,136 +1,306 @@
 #!/usr/bin/env python3
-
+import os
+import sys
+import subprocess
+import re
 import argparse
 import datetime
-import os
 import random
-import subprocess
-import sys
-from typing import List, Dict, Any, Optional
-
+from pathlib import Path
 from jinja2 import Template
+from typing import List, Dict, Optional, Tuple, Any
 
-def run_git_command(command: List[str]) -> str:
-    """Run a git command and return its output."""
-    try:
+
+# Default configuration
+DEFAULT_WORK_HOURS = (8, 19)  # 8am to 7pm
+DEFAULT_NIGHT_HOURS = (20, 5)  # 8pm to 5am
+DEFAULT_SKIP_WEEKENDS = True
+DEFAULT_MIN_COMMIT_SPACING = 10  # minutes
+
+
+class GitCommit:
+    def __init__(self, hash: str, date: datetime.datetime, new_date: Optional[datetime.datetime] = None):
+        self.hash = hash
+        self.date = date
+        self.new_date = new_date
+
+    def __repr__(self) -> str:
+        return f"GitCommit(hash='{self.hash}', date='{self.date}', new_date='{self.new_date}')"
+
+
+class GitRepository:
+    def __init__(self, path: str = "."):
+        self.path = path
+        if not self._is_git_repo():
+            raise ValueError(f"Not a git repository: {path}")
+        
+    def _is_git_repo(self) -> bool:
+        try:
+            subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=self.path,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+                text=True
+            )
+            return True
+        except subprocess.CalledProcessError:
+            return False
+    
+    def _get_user_email(self) -> str:
         result = subprocess.run(
-            ["git"] + command,
+            ["git", "config", "user.email"],
+            cwd=self.path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             check=True,
-            capture_output=True,
             text=True
         )
         return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        print(f"Error running git command: {e}")
-        print(f"Error output: {e.stderr}")
-        sys.exit(1)
-
-def is_git_repository() -> bool:
-    """Check if the current directory is a git repository."""
-    try:
-        subprocess.run(
-            ["git", "rev-parse", "--is-inside-work-tree"],
+    
+    def get_commits(self) -> List[GitCommit]:
+        user_email = self._get_user_email()
+        result = subprocess.run(
+            ["git", "log", "--format=%H|%aI|%cI|%ae", "--date=iso-strict"],
+            cwd=self.path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             check=True,
-            capture_output=True,
+            text=True
         )
+        
+        commits = []
+        for line in result.stdout.strip().split('\n'):
+            if not line:
+                continue
+                
+            parts = line.split('|')
+            if len(parts) < 4:
+                continue
+                
+            commit_hash, author_date, committer_date, author_email = parts
+            
+            # Only process commits by the current user
+            if author_email.strip() != user_email:
+                continue
+                
+            # Use author date for consistency
+            date = parse_git_date(author_date)
+            commits.append(GitCommit(commit_hash, date))
+            
+        return commits
+    
+    def install_pre_push_hook(self) -> None:
+        hooks_dir = os.path.join(self.path, ".git", "hooks")
+        os.makedirs(hooks_dir, exist_ok=True)
+        
+        hook_path = os.path.join(hooks_dir, "pre-push")
+        hook_content = """#!/bin/sh
+# pre-push hook to prevent pushing commits made during work hours
+
+if ! command -v the-night-before &> /dev/null; then
+    echo "the-night-before tool not found. Please install it first."
+    exit 1
+fi
+
+# Check for commits during work hours
+if ! the-night-before check; then
+    echo "Push rejected: Commits during work hours detected."
+    echo "Run 'the-night-before fix' to fix the commit times."
+    exit 1
+fi
+
+exit 0
+"""
+        
+        with open(hook_path, 'w') as f:
+            f.write(hook_content)
+        
+        os.chmod(hook_path, 0o755)  # Make executable
+        print(f"Pre-push hook installed at {hook_path}")
+
+
+def parse_git_date(date_str: str) -> datetime.datetime:
+    """Parse git date strings in various formats."""
+    # Try ISO 8601 format first
+    try:
+        return datetime.datetime.fromisoformat(date_str)
+    except ValueError:
+        pass
+    
+    # Try RFC 2822 format
+    try:
+        # Example: "Mon, 10 Mar 2025 16:08:59 +0000"
+        import email.utils
+        time_tuple = email.utils.parsedate_tz(date_str)
+        if time_tuple:
+            return datetime.datetime.fromtimestamp(email.utils.mktime_tz(time_tuple))
+    except Exception:
+        pass
+    
+    # Fall back to a more generic approach
+    try:
+        # Using datetime's parser as a last resort
+        return datetime.datetime.strptime(date_str, "%a %b %d %H:%M:%S %Y %z")
+    except ValueError:
+        raise ValueError(f"Unable to parse git date: {date_str}")
+
+
+def is_workday(date: datetime.datetime, skip_weekends: bool = True) -> bool:
+    """Check if the given date is a workday (not a weekend)."""
+    if not skip_weekends:
         return True
-    except subprocess.CalledProcessError:
-        return False
+    
+    # 0 = Monday, 6 = Sunday in Python's datetime
+    return date.weekday() < 5  # Monday to Friday
 
-def get_commits_last_24h() -> List[Dict[str, Any]]:
-    """Get all commits from the last 24 hours."""
-    since_time = datetime.datetime.now() - datetime.timedelta(days=1)
-    since_str = since_time.strftime("%Y-%m-%d %H:%M:%S")
+
+def is_work_hours(date: datetime.datetime, work_hours: Tuple[int, int]) -> bool:
+    """Check if the given time falls within work hours."""
+    work_start, work_end = work_hours
+    hour = date.hour
     
-    # Get the commit hashes
-    commit_hashes = run_git_command(["log", "--since", since_str, "--format=%H"]).splitlines()
+    # Handle work hours spanning midnight
+    if work_start < work_end:
+        return work_start <= hour < work_end
+    else:
+        return hour >= work_start or hour < work_end
+
+
+def get_commits_during_work_hours(
+    commits: List[GitCommit], 
+    work_hours: Tuple[int, int] = DEFAULT_WORK_HOURS,
+    skip_weekends: bool = DEFAULT_SKIP_WEEKENDS
+) -> List[GitCommit]:
+    """Filter commits made during work hours."""
+    work_hour_commits = []
     
-    commits = []
-    for commit_hash in commit_hashes:
-        # Get the commit timestamp
-        timestamp_str = run_git_command(["show", "-s", "--format=%at", commit_hash])
-        timestamp = int(timestamp_str)
-        commit_time = datetime.datetime.fromtimestamp(timestamp)
+    for commit in commits:
+        if is_workday(commit.date, skip_weekends) and is_work_hours(commit.date, work_hours):
+            work_hour_commits.append(commit)
+    
+    return work_hour_commits
+
+
+def generate_night_before_time(
+    commit_date: datetime.datetime,
+    night_hours: Tuple[int, int] = DEFAULT_NIGHT_HOURS,
+    min_spacing: int = DEFAULT_MIN_COMMIT_SPACING,
+    previous_date: Optional[datetime.datetime] = None
+) -> datetime.datetime:
+    """
+    Generate a timestamp for the night before the commit.
+    
+    Args:
+        commit_date: Original commit datetime
+        night_hours: Tuple of (start_hour, end_hour) for night hours
+        min_spacing: Minimum minutes between commits
+        previous_date: Previous commit's adjusted date (if any)
         
-        commits.append({
-            "hash": commit_hash,
-            "time": commit_time,
-            "timestamp": timestamp,
-        })
+    Returns:
+        New datetime for the commit
+    """
+    night_start, night_end = night_hours
     
-    # Sort by timestamp
-    commits.sort(key=lambda x: x["timestamp"])
+    # Get the day before
+    day_before = commit_date.replace(hour=0, minute=0, second=0, microsecond=0) - datetime.timedelta(days=1)
     
-    return commits
-
-def is_work_hours(dt: datetime.datetime) -> bool:
-    """Check if a datetime is during work hours (8am-7pm)."""
-    return 8 <= dt.hour < 19
-
-def find_commits_in_work_hours() -> List[Dict[str, Any]]:
-    """Find all commits made during work hours in the last 24 hours."""
-    commits = get_commits_last_24h()
-    return [commit for commit in commits if is_work_hours(commit["time"])]
-
-def generate_new_timestamps(commits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Generate new timestamps for commits, maintaining chronological order."""
-    if not commits:
-        return []
+    # Set the start time to night_start on the day before
+    start_time = day_before.replace(hour=night_start, minute=0, second=0, microsecond=0)
     
-    # Find the night before
-    now = datetime.datetime.now()
-    # Use timedelta to properly handle month/year boundaries
-    yesterday = now - datetime.timedelta(days=1)
-    night_start = datetime.datetime(
-        yesterday.year, yesterday.month, yesterday.day, 22, 0, 0
-    )  # 10pm last night
-    night_end = datetime.datetime(
-        now.year, now.month, now.day, 3, 0, 0
-    )  # 3am this morning
+    # Handle night hours spanning midnight
+    if night_end < night_start:
+        end_time = day_before.replace(hour=night_end, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
+    else:
+        end_time = day_before.replace(hour=night_end, minute=0, second=0, microsecond=0)
     
-    # Calculate available time in seconds
-    total_seconds = (night_end - night_start).total_seconds()
+    # Adjust start_time if we have a previous commit's adjusted date
+    if previous_date:
+        min_start_time = previous_date + datetime.timedelta(minutes=min_spacing)
+        if min_start_time > start_time:
+            if min_start_time >= end_time:
+                raise ValueError(
+                    f"Cannot satisfy minimum spacing constraint of {min_spacing} minutes between commits. "
+                    f"Previous commit at {previous_date}, cannot find suitable time before {end_time}."
+                )
+            start_time = min_start_time
     
-    # Divide the time into chunks
-    chunk_size = total_seconds / len(commits)
+    # Calculate available minutes between start and end time
+    available_minutes = int((end_time - start_time).total_seconds() / 60)
     
-    # Update each commit with a new timestamp
-    result = []
-    for i, commit in enumerate(commits):
-        # Define the chunk boundaries
-        chunk_start = night_start + datetime.timedelta(seconds=i * chunk_size)
-        chunk_end = night_start + datetime.timedelta(seconds=(i + 1) * chunk_size)
-        
-        # Choose a random time within the chunk, normally distributed around the middle
-        chunk_middle = chunk_start + (chunk_end - chunk_start) / 2
-        # Standard deviation of 1/6 of chunk size to keep most times within the chunk
-        std_dev = chunk_size / 6
-        
-        # Generate random time
-        random_seconds = random.normalvariate(
-            (chunk_middle - chunk_start).total_seconds(), 
-            std_dev
+    if available_minutes <= 0:
+        raise ValueError(
+            f"No available time in night hours ({night_start}:00-{night_end}:00) for commit. "
+            f"Start time: {start_time}, End time: {end_time}"
         )
-        # Ensure we stay within the chunk
-        random_seconds = max(0, min(random_seconds, chunk_size))
-        
-        new_time = chunk_start + datetime.timedelta(seconds=random_seconds)
-        
-        # Format for git (e.g., "Fri Jan 2 21:38:53 2009 -0800")
-        timezone = datetime.datetime.now().astimezone().strftime("%z")
-        # Git format doesn't use colon in timezone
-        new_date = new_time.strftime("%a %b %-d %H:%M:%S %Y ") + timezone
-        
-        result.append({
-            **commit,
-            "new_date": new_date,
-            "new_time": new_time,
-        })
     
-    return result
+    # Pick a random minute within the available range, preserving original timezone
+    random_minutes = random.randint(0, available_minutes)
+    new_date = start_time + datetime.timedelta(minutes=random_minutes)
+    
+    # Preserve the original timezone
+    if commit_date.tzinfo:
+        new_date = new_date.replace(tzinfo=commit_date.tzinfo)
+        
+    return new_date
 
-def format_filter_branch_command(commits: List[Dict[str, Any]]) -> str:
-    """Format the git filter-branch command using the jinja2 template."""
+
+def assign_night_before_dates(
+    commits: List[GitCommit],
+    night_hours: Tuple[int, int] = DEFAULT_NIGHT_HOURS,
+    min_spacing: int = DEFAULT_MIN_COMMIT_SPACING
+) -> List[GitCommit]:
+    """
+    Assign night-before timestamps to the commits, ensuring minimum spacing.
+    
+    Args:
+        commits: List of commits to fix
+        night_hours: Tuple of (start_hour, end_hour) for night hours
+        min_spacing: Minimum minutes between commits
+        
+    Returns:
+        List of commits with new_date fields assigned
+    """
+    # Sort commits by date, oldest first
+    sorted_commits = sorted(commits, key=lambda c: c.date)
+    
+    # Clone the list to avoid modifying the input
+    result_commits = []
+    previous_date = None
+    
+    for commit in sorted_commits:
+        new_date = generate_night_before_time(
+            commit.date, 
+            night_hours, 
+            min_spacing,
+            previous_date
+        )
+        
+        result_commits.append(GitCommit(commit.hash, commit.date, new_date))
+        previous_date = new_date
+        
+    return result_commits
+
+
+def format_git_date(dt: datetime.datetime) -> str:
+    """Format a datetime in the ISO 8601 format that Git expects."""
+    if not dt.tzinfo:
+        # Use local timezone if none provided
+        dt = dt.astimezone()
+    return dt.isoformat()
+
+
+def generate_filter_branch_command(commits: List[GitCommit]) -> str:
+    """
+    Generate the git filter-branch command to update commit timestamps.
+    
+    Args:
+        commits: List of commits with new_date fields assigned
+        
+    Returns:
+        The git filter-branch command as a string
+    """
     template_str = """git filter-branch -f --env-filter \\
     '{% for commit in commits_to_fix %}
     if [ $GIT_COMMIT = {{ commit.hash }} ]
@@ -140,133 +310,247 @@ def format_filter_branch_command(commits: List[Dict[str, Any]]) -> str:
      fi{% endfor %}'"""
     
     template = Template(template_str)
-    return template.render(commits_to_fix=commits)
+    
+    # Format the dates for the template
+    commits_to_fix = []
+    for commit in commits:
+        if commit.new_date:
+            commits_to_fix.append({
+                'hash': commit.hash,
+                'new_date': format_git_date(commit.new_date)
+            })
+    
+    return template.render(commits_to_fix=commits_to_fix)
 
-def cmd_check() -> bool:
-    """Check if any commits are made in work hours."""
-    work_hour_commits = find_commits_in_work_hours()
-    
-    if work_hour_commits:
-        print("Found commits during work hours (8am-7pm):")
-        for commit in work_hour_commits:
-            hash_short = commit["hash"][:8]
-            time_str = commit["time"].strftime("%Y-%m-%d %H:%M:%S")
-            print(f"  {hash_short} - {time_str}")
-        print("\nUse 'the-night-before fix' to update these commit times.")
-        return False
-    else:
-        print("No commits found during work hours.")
-        return True
 
-def cmd_install_git_hooks():
-    """Install git pre-push hooks."""
-    hooks_dir = ".git/hooks"
-    
-    # Ensure the hooks directory exists
-    if not os.path.exists(hooks_dir):
-        os.makedirs(hooks_dir)
-    
-    pre_push_path = os.path.join(hooks_dir, "pre-push")
-    hook_content = """#!/bin/sh
-# Pre-push hook to check for commits during work hours
-
-the-night-before check
-if [ $? -ne 0 ]; then
-    echo "Push rejected: Commits during work hours detected."
-    echo "Run 'the-night-before fix' to fix the commit times."
-    exit 1
-fi
-"""
-    
-    with open(pre_push_path, "w") as f:
-        f.write(hook_content)
-    
-    # Make the hook executable
-    os.chmod(pre_push_path, 0o755)
-    
-    print("Git pre-push hook installed successfully.")
-
-def cmd_fix(dry_run: bool = False):
-    """Fix commits made during work hours."""
-    all_commits = get_commits_last_24h()
-    if not all_commits:
-        print("No commits found in the last 24 hours.")
-        return
-    
-    # Always fix all commits from the last 24 hours to maintain chronological order
-    updated_commits = generate_new_timestamps(all_commits)
-    
-    print("Commits to update:")
-    for commit in updated_commits:
-        hash_short = commit["hash"][:8]
-        old_time = commit["time"].strftime("%Y-%m-%d %H:%M:%S")
-        new_time = commit["new_time"].strftime("%Y-%m-%d %H:%M:%S")
+def check_command(args: argparse.Namespace) -> int:
+    """Check if there are commits during work hours."""
+    try:
+        repo = GitRepository(args.repo_path)
+        commits = repo.get_commits()
+        work_hour_commits = get_commits_during_work_hours(
+            commits, 
+            args.work_hours,
+            args.skip_weekends
+        )
         
-        if is_work_hours(commit["time"]):
-            print(f"  {hash_short} - {old_time} => {new_time} (work hours fixed)")
+        if work_hour_commits:
+            print(f"Found commits during work hours ({args.work_hours[0]}am-{args.work_hours[1]}pm):")
+            for commit in work_hour_commits:
+                print(f"  {commit.hash[:8]} - {commit.date.strftime('%Y-%m-%d %H:%M:%S')}")
+            print("\nUse 'the-night-before fix' to update these commit times.")
+            return 1
         else:
-            print(f"  {hash_short} - {old_time} => {new_time} (keeping chronological order)")
-    
-    filter_branch_cmd = format_filter_branch_command(updated_commits)
-    
-    print("\nCommand that will be executed:")
-    print(filter_branch_cmd)
-    
-    if dry_run:
-        print("\nDry run - no changes made.")
-        return
-    
-    confirmation = input("\nProceed with these changes? (y/n): ").strip().lower()
-    if confirmation == "y":
-        # Execute the command
-        try:
-            subprocess.run(filter_branch_cmd, shell=True, check=True)
-            print("Commit times updated successfully.")
-        except subprocess.CalledProcessError as e:
-            print(f"Error updating commit times: {e}")
-            print("If you get an error about a previous filter-branch operation,")
-            print("try running: git filter-branch -f")
-    else:
-        print("Operation cancelled.")
+            print("No commits during work hours found.")
+            return 0
+    except Exception as e:
+        print(f"Error in check command: {e}")
+        return 1
 
-def main():
-    """Main entry point for the script."""
-    if not is_git_repository():
-        print("Error: Current directory is not a git repository.")
-        sys.exit(1)
-    
+
+def install_git_hooks_command(args: argparse.Namespace) -> int:
+    """Install git pre-push hooks."""
+    try:
+        repo = GitRepository(args.repo_path)
+        repo.install_pre_push_hook()
+        return 0
+    except Exception as e:
+        print(f"Error installing git hooks: {e}")
+        return 1
+
+
+def dry_run_command(args: argparse.Namespace) -> int:
+    """Perform a dry run of the fix command."""
+    try:
+        repo = GitRepository(args.repo_path)
+        commits = repo.get_commits()
+        work_hour_commits = get_commits_during_work_hours(
+            commits, 
+            args.work_hours,
+            args.skip_weekends
+        )
+        
+        if not work_hour_commits:
+            print("No commits during work hours found.")
+            return 0
+        
+        print(f"Found {len(work_hour_commits)} commits during work hours.")
+        print("Dry run - would fix these commits:")
+        
+        fixed_commits = assign_night_before_dates(
+            work_hour_commits,
+            args.night_hours,
+            args.min_spacing
+        )
+        
+        for commit in fixed_commits:
+            print(f"  {commit.hash[:8]} - Original: {commit.date.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"             -> New date: {commit.new_date.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        print("\nCommand that would be run:")
+        command = generate_filter_branch_command(fixed_commits)
+        print(command)
+        
+        return 0
+    except Exception as e:
+        print(f"Error in dry run: {e}")
+        return 1
+
+
+def fix_command(args: argparse.Namespace) -> int:
+    """Fix commit timestamps to be outside work hours."""
+    try:
+        repo = GitRepository(args.repo_path)
+        commits = repo.get_commits()
+        work_hour_commits = get_commits_during_work_hours(
+            commits, 
+            args.work_hours,
+            args.skip_weekends
+        )
+        
+        if not work_hour_commits:
+            print("No commits during work hours found.")
+            return 0
+        
+        print(f"Found {len(work_hour_commits)} commits during work hours.")
+        
+        fixed_commits = assign_night_before_dates(
+            work_hour_commits,
+            args.night_hours,
+            args.min_spacing
+        )
+        
+        for commit in fixed_commits:
+            print(f"  {commit.hash[:8]} - Original: {commit.date.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"             -> New date: {commit.new_date.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        command = generate_filter_branch_command(fixed_commits)
+        print("\nThe following command will be executed:")
+        print(command)
+        
+        if not args.yes:
+            confirmation = input("\nProceed with rewriting history? (y/N): ")
+            if confirmation.lower() != 'y':
+                print("Operation cancelled.")
+                return 0
+        
+        # Execute the command
+        print("\nExecuting filter-branch command...")
+        result = subprocess.run(
+            command,
+            cwd=repo.path,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        if result.returncode != 0:
+            print(f"Error executing filter-branch command: {result.stderr}")
+            return 1
+        
+        print("Successfully updated commit timestamps.")
+        print("NOTE: You may need to force push your changes with 'git push -f'")
+        return 0
+    except Exception as e:
+        print(f"Error fixing commits: {e}")
+        return 1
+
+
+def parse_hour_range(value: str) -> Tuple[int, int]:
+    """Parse a range of hours as 'start-end'."""
+    try:
+        start, end = map(int, value.split('-'))
+        return (start, end)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"Invalid hour range: {value}. Expected format: 'start-end'")
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Modify git commit timestamps to make them look like they were committed outside work hours."
+        description="Modify git commit timestamps to appear as if you worked outside business hours."
     )
     
-    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+    # Common arguments
+    parser.add_argument(
+        '--repo-path', 
+        type=str, 
+        default=".", 
+        help="Path to the git repository (default: current directory)"
+    )
+    parser.add_argument(
+        '--work-hours', 
+        type=parse_hour_range, 
+        default=f"{DEFAULT_WORK_HOURS[0]}-{DEFAULT_WORK_HOURS[1]}", 
+        help=f"Work hours as 'start-end' in 24h format (default: {DEFAULT_WORK_HOURS[0]}-{DEFAULT_WORK_HOURS[1]})"
+    )
+    parser.add_argument(
+        '--night-hours', 
+        type=parse_hour_range, 
+        default=f"{DEFAULT_NIGHT_HOURS[0]}-{DEFAULT_NIGHT_HOURS[1]}", 
+        help=f"Night hours as 'start-end' in 24h format (default: {DEFAULT_NIGHT_HOURS[0]}-{DEFAULT_NIGHT_HOURS[1]})"
+    )
+    parser.add_argument(
+        '--skip-weekends', 
+        action='store_true', 
+        default=DEFAULT_SKIP_WEEKENDS,
+        help="Skip checking commits made on weekends (default: True)"
+    )
+    parser.add_argument(
+        '--no-skip-weekends', 
+        action='store_false', 
+        dest='skip_weekends',
+        help="Check commits made on weekends"
+    )
+    parser.add_argument(
+        '--min-spacing', 
+        type=int, 
+        default=DEFAULT_MIN_COMMIT_SPACING,
+        help=f"Minimum spacing between commits in minutes (default: {DEFAULT_MIN_COMMIT_SPACING})"
+    )
+    parser.add_argument(
+        '-y', '--yes', 
+        action='store_true', 
+        help="Skip confirmation prompt"
+    )
     
-    # check command
-    subparsers.add_parser("check", help="Check for commits during work hours")
+    # Subcommands
+    subparsers = parser.add_subparsers(dest='command', help='Command to execute')
     
-    # install-git-hooks command
-    subparsers.add_parser("install-git-hooks", help="Install git pre-push hooks")
+    # Check command
+    check_parser = subparsers.add_parser('check', help='Check for commits during work hours')
     
-    # fix command
-    subparsers.add_parser("fix", help="Fix commit timestamps")
+    # Install git hooks command
+    hooks_parser = subparsers.add_parser('install-git-hooks', help='Install git pre-push hooks')
     
-    # dry-run command
-    subparsers.add_parser("dry-run", help="Show what would be changed without making changes")
+    # Fix command
+    fix_parser = subparsers.add_parser('fix', help='Fix commit timestamps to be outside work hours')
     
+    # Dry run command
+    dry_run_parser = subparsers.add_parser('dry-run', help='Show what would be done without making changes')
+    
+    # Parse arguments
     args = parser.parse_args()
     
-    if args.command == "check":
-        success = cmd_check()
-        if not success:
-            sys.exit(1)
-    elif args.command == "install-git-hooks":
-        cmd_install_git_hooks()
-    elif args.command == "fix":
-        cmd_fix()
-    elif args.command == "dry-run":
-        cmd_fix(dry_run=True)
+    # Convert string arguments to proper types when needed
+    if isinstance(args.work_hours, str):
+        args.work_hours = parse_hour_range(args.work_hours)
+    if isinstance(args.night_hours, str):
+        args.night_hours = parse_hour_range(args.night_hours)
+    
+    # Execute the appropriate command
+    if args.command == 'check':
+        return check_command(args)
+    elif args.command == 'install-git-hooks':
+        return install_git_hooks_command(args)
+    elif args.command == 'fix':
+        return fix_command(args)
+    elif args.command == 'dry-run':
+        return dry_run_command(args)
     else:
         parser.print_help()
+        return 1
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
